@@ -137,12 +137,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	}
 
 	t.Log("Require resources on the independently authored hybrid conductor")
-	fixture := newV2CompilerFixture()
-	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	fixture.selectedPropSyncChains = nil
-	fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
-	snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-	source := staticModelRegistry{"build": snapshot}
+	source := staticModelRegistry{"build": acquireHybridTestSnapshot(t)}
 	_, err = ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), source)
 	require.ErrorContains(t, err, "requires a positive GPU count")
 	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
@@ -503,6 +498,71 @@ func TestResolveWorkloadPreservesAuthoredLaunch(t *testing.T) {
 	require.Equal(t, before, dgd)
 }
 
+func TestResolveWorkloadPlacesRuntimeSidecarWithTheEngine(t *testing.T) {
+	t.Log("Acquire single-Pod HX, two-Pod HX, four-Pod XT and hybrid builds")
+	multiPodHX := newV3CompilerFixture()
+	multiPodHX.selectedPropSyncChains = [][]uint32{{1, 2}}
+	multiPodHX.partitions = append(multiPodHX.partitions, testV3CapnpPartition{
+		id: 2, deviceType: manifestcapnp.DeviceType_lpu, topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16,
+	})
+	snapshots := map[string]*Build{
+		"hx":           acquireTestSnapshot(t, writeV3CompilerFixture(t)),
+		"multi-pod-hx": acquireTestSnapshot(t, writeCompilerFixture(t, multiPodHX)),
+		"multi-pod-xt": acquireTestSnapshot(t, writeV2CompilerFixture(t)),
+		"hybrid":       acquireHybridTestSnapshot(t),
+	}
+
+	t.Log("Cover the multi-Pod agent placement and the builds whose engine runs elsewhere")
+	for _, test := range []struct {
+		name        string
+		build       string
+		sidecarRole string
+		wantAgents  int
+		wantErr     string
+	}{
+		{name: "agent sidecar serves a multi-Pod XT build", build: "multi-pod-xt", sidecarRole: v1beta1.ComponentRoleLPXAgent, wantAgents: 4},
+		{name: "agent sidecar rejects a multi-Pod HX build", build: "multi-pod-hx", sidecarRole: v1beta1.ComponentRoleLPXAgent,
+			wantErr: `component "lpx" agent "runtime" sidecar serves several Agent Pods only for xt8888 builds, but hx16x8x2x3 build "build" places 2 Agent Pods; declare the conductor role instead`},
+		{name: "agent sidecar rejects a hybrid build", build: "hybrid", sidecarRole: v1beta1.ComponentRoleLPXAgent,
+			wantErr: `component "lpx" agent "runtime" sidecar requires an LPU-only single-model build; declare the conductor role instead`},
+		{name: "conductor sidecar rejects an LPU-only build", build: "hx", sidecarRole: v1beta1.ComponentRoleLPXConductor,
+			wantErr: `component "lpx" conductor Dynamo sidecar mode requires a hybrid build whose conductor runs the GPU engine`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Author the runtime sidecar, behind a setup init container, in the selected role")
+			agent, conductor := testLPXPodTemplate("agent"), testLPXPodTemplate("conductor")
+			roles := []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: agent}}
+			sidecarTemplate := agent
+			if test.sidecarRole == v1beta1.ComponentRoleLPXConductor {
+				roles = append(roles, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: conductor})
+				sidecarTemplate = conductor
+			}
+			sidecarTemplate.Spec.InitContainers = []corev1.Container{
+				{Name: "setup", Image: "setup"},
+				{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
+			}
+			dgd := newSelectedTestDGD(t, "selected", testLPXComponent("lpx", "build", roles...))
+			before := dgd.DeepCopy()
+
+			t.Log("Resolve the build without mutating the graph")
+			workload, err := ResolveWorkload(t.Context(), fake.NewClientBuilder().Build(), dgd, singleGroupComponents(t, dgd), staticModelRegistry{"build": snapshots[test.build]})
+			require.Equal(t, before, dgd)
+			if test.wantErr != "" {
+				require.ErrorIs(t, err, ErrUnsupportedRuntime)
+				require.EqualError(t, err, "unsupported LPX runtime: "+test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+
+			t.Log("Serve from every Agent Pod the build places")
+			require.True(t, workload.ServesFromAgent())
+			plan, err := workload.PlanNodeLocalMaterialization("pcs")
+			require.NoError(t, err)
+			require.Equal(t, []ExpectedAgent{{TemplateName: "agt", Replicas: test.wantAgents}}, plan.Agents)
+		})
+	}
+}
+
 func TestResolveWorkloadIsolatesComponentGroups(t *testing.T) {
 	t.Log("Author two LPU-only workloads with different builds and replica counts")
 	reader := fake.NewClientBuilder().Build()
@@ -547,4 +607,14 @@ func TestExpandedModelNames(t *testing.T) {
 	require.Equal(t, []string{"draft0"}, expandedModelNames(2, false, 1))
 	require.Equal(t, []string{"target"}, expandedModelNames(2, true, 1))
 	require.Equal(t, []string{"default"}, expandedModelNames(1, true, 2))
+}
+
+// acquireHybridTestSnapshot acquires a revision-2 build whose CUDA partition selects a Cyborg conductor.
+func acquireHybridTestSnapshot(t *testing.T) *Build {
+	t.Helper()
+	fixture := newV2CompilerFixture()
+	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
+	fixture.selectedPropSyncChains = nil
+	fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
+	return acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 }

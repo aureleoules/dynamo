@@ -12,6 +12,7 @@ type Workload struct {
 	modelProjections     []*ModelProjection
 	digest               WorkloadDigest
 	scalingGroupReplicas int32
+	servesFromAgent      bool
 }
 
 // ModelProjections returns a read-only view of the workload's model projections.
@@ -45,4 +46,10 @@ func (w *Workload) ComponentNames() []string {
 // ServingComponentName returns the conductor owner, placed last by ResolveWorkload.
 func (w *Workload) ServingComponentName() string {
 	return w.modelProjections[len(w.modelProjections)-1].stage
+}
+
+// ServesFromAgent reports whether the serving component's agent runtime sidecar
+// serves the workload from its Agent Pods in place of a conductor role.
+func (w *Workload) ServesFromAgent() bool {
+	return w.servesFromAgent
 }

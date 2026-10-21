@@ -282,14 +282,19 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent)
 		lpuRole := lpxRoleComponent(component, agent.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
 		lpuDefaults := &podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: servingHash}
+
+		// Render the Agent and its runtime sidecar through the shared renderer.
 		lpuTemplate, err := renderSelectedLPXRole(lpuRole, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 			p.discoveryContext, lpuDefaults)
 		if err != nil {
 			return nil, fmt.Errorf("rendering %s.agent: rendering selected LPX base pod: %w", component.ComponentName, err)
 		}
+
 		input.Stages[component.ComponentName] = *lpuTemplate
 		conductor := component.ComponentRole(v1beta1.ComponentRoleLPXConductor)
-		if component != p.component {
+
+		// Only the serving component renders a conductor; an agent runtime sidecar replaces it.
+		if component != p.component || workload.ServesFromAgent() {
 			continue
 		}
 
@@ -399,6 +404,10 @@ func renderSelectedLPXRole(
 	// Capture authored precedence before PodSpec defaults fill the role's metadata.
 	metadata := generatePodMetadata(component, dgd, alphaComponent, componentName, discoveryContext)
 	metadata.Labels[commonconsts.KubeLabelDynamoWorkerHash] = defaults.servingHash
+	// Hybrid conductor sidecars use the worker-hash suffix for their serving namespace.
+	if GetDynamoSidecar(component) != nil {
+		ensurePodTemplate(component).Labels[commonconsts.KubeLabelDynamoWorkerHash] = defaults.servingHash
+	}
 	applyDGDTemplateDefaults(component, dgd, nil)
 	basePodSpec, err := generateBasePodSpecWithDefaults(
 		component,

@@ -50,6 +50,7 @@ type MaterializationPlan struct {
 	// PodCliqueSetName is the actual PCS used for every generated child address.
 	PodCliqueSetName string
 	// ConductorTemplate is the conductor PodClique template name, if present.
+	// It is empty when the workload serves from its agent runtime sidecar.
 	ConductorTemplate string
 	// Agents contains the expected materialized Agent identities.
 	Agents []ExpectedAgent
@@ -76,10 +77,12 @@ func (w *Workload) PlanNodeLocalMaterialization(pcsName string) (*Materializatio
 		return nil, fmt.Errorf("PodCliqueSet name %q exceeds the LPX maximum of %d characters", pcsName, MaxPodCliqueSetNameLength)
 	}
 
-	// Nova and Cyborg both implement the authored conductor role.
+	// Nova and Cyborg both implement the authored conductor role; an agent runtime sidecar replaces it.
 	conductorTemplate, cyborgTemplate := conductorTemplateName, ""
 	if w.Pipeline() == PipelineHybrid {
 		conductorTemplate, cyborgTemplate = "", conductorTemplateName
+	} else if w.servesFromAgent {
+		conductorTemplate = ""
 	}
 	agents := make([]ExpectedAgent, 0, len(w.modelProjections))
 	for index, projection := range w.modelProjections {
@@ -179,7 +182,7 @@ func materializedPodHostname(cliqueName string, podIndex int) string {
 // WithGroup scopes a workload's resource names within a multi-workload PCS.
 // Sole workloads retain the unscoped plan's established names.
 // The receiver is a validated non-nil base plan and groupName is an admitted,
-// non-empty conductor component name from ComponentGroups.
+// non-empty serving component name from ComponentGroups.
 // The receiver is not mutated; names that cannot fit Grove's budget are rejected.
 func (p *MaterializationPlan) WithGroup(groupName string) (*MaterializationPlan, error) {
 	// Reserve the group prefix in both the scaling group and its longest role.

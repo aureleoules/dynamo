@@ -1922,7 +1922,19 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 
 	// Merge runtime defaults only into the selected restartable init container.
 	if nativeSidecar {
-		if err := mergeDynamoSidecarDefaults(&podSpec, componentContext); err != nil {
+		// LPX roles take their runtime bindings from the LPX role defaults, without worker ports or health checks.
+		var base corev1.Container
+		if component.IsLPX() {
+			base, err = componentDefaults.GetBaseContainer(componentContext)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get runtime sidecar base container: %w", err)
+			}
+		} else {
+			base = dynamoSidecarBaseContainer(componentContext)
+		}
+
+		// Authored sidecar settings override the selected runtime defaults.
+		if err := mergeDynamoSidecarDefaults(&podSpec, base); err != nil {
 			return nil, err
 		}
 	} else {

@@ -133,9 +133,11 @@ func (r *graphReconciler) renderPodCliqueSet(
 			return nil, nil, err
 		}
 
-		// Discovery selects only this workload's conductor; all auxiliary roles stay private.
+		// Discovery selects only this workload's serving role; all auxiliary roles stay private.
 		serving := plan.ConductorTemplate
-		if serving == "" {
+		if workload.ServesFromAgent() {
+			serving = plan.Agents[len(plan.Agents)-1].TemplateName
+		} else if serving == "" {
 			serving = plan.CyborgTemplate
 		}
 		for _, clique := range rendered.Cliques {
